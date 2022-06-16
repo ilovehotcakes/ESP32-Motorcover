@@ -20,7 +20,7 @@ ESP32 with TMC2209 stallguard example: https://github.com/edwardocano/Esp32-TMC2
 How to connect TMC2209 for UART (stallguard): https://forum.arduino.cc/t/using-a-tmc2209-silent-stepper-motor-driver-with-an-arduino/666992/14
 Explaning TMC2209 settings: https://forum.arduino.cc/t/using-a-tmc2209-silent-stepper-motor-driver-with-an-arduino/666992/25
 TMCStepper library documentation: https://teemuatlut.github.io/TMCStepper/class_t_m_c2209_stepper.html
-FastAccelStepper library documentation: https://github.com/gin66/FastAccelStepper/blob/master/extras/doc/FastAccelStepper_API.md
+AccelStepper library documentation: https://www.airspayce.com/mikem/arduino/AccelStepper/classAccelStepper.html
 
 More explanation on Stallguard: https://gist.github.com/metalinspired/dcfe07ed0b9f42870eb54dcf8e29c126
 

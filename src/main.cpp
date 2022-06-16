@@ -109,7 +109,7 @@ void core0Task(void * parameter) {
         connectMqtt();
 
         // Update MQTT server of current shade opening position
-        sendMqtt((String) motorCurrentPercentage());
+        sendMqtt((String) motorCurrentPercent());
 
         // Turn off LED to indicate fully connected
         digitalWrite(LED_PIN, LOW);

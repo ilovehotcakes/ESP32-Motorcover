@@ -13,13 +13,12 @@
   slips.
 **/
 #include <TMCStepper.h>
-#include <FastAccelStepper.h>
+#include <AccelStepper.h>
 #include <Preferences.h>
 #include "motor_settings.h"
 
 TMC2209Stepper driver(&SERIAL_PORT, R_SENSE, DRIVER_ADDR);
-FastAccelStepperEngine engine = FastAccelStepperEngine();
-FastAccelStepper *stepper;
+AccelStepper stepper(AccelStepper::DRIVER, STEP_PIN, DIR_PIN);
 Preferences memory;
 void sendMqtt(String);
 
@@ -30,10 +29,12 @@ int prevPos = 0;
 bool isSetMax = false;
 bool isSetMin = false;
 bool isMotorRunning = false;
+bool isMotorStalled = false;
 
 
 void IRAM_ATTR stallguardInterrupt() {
-  stepper->forceStop();
+  isMotorRunning = false;
+  isMotorStalled = true;
   Serial.println("[I] Motor stalled");
 }
 
@@ -42,7 +43,7 @@ void loadPositions() {
   memory.begin("local", false);
   maxPos = memory.getInt("maxPos", 50000);
   currPos = memory.getInt("currPos", 0);
-  stepper->setCurrentPosition(currPos);
+  stepper.setCurrentPosition(currPos);
 }
 
 
@@ -58,7 +59,7 @@ void motorSetup() {
   driver.begin();             // Begin sending data
   driver.toff(4);             // Not used in StealthChop but required to enable the motor, 0=off
   driver.pdn_disable(true);   // PDN_UART input disabled; set this bit when using the UART interface
-  driver.rms_current(475);    // Motor RMS current "rms_current will by default set ihold to 50% of irun but you can set your own ratio with additional second argument; rms_current(1000, 0.3)."
+  driver.rms_current(600);    // Motor RMS current "rms_current will by default set ihold to 50% of irun but you can set your own ratio with additional second argument; rms_current(1000, 0.3)."
   driver.pwm_autoscale(true);    // Needed for StealthChop
   driver.en_spreadCycle(false);  // Disable SpreadCycle; SC is faster but louder
   driver.blank_time(24);         // Comparator blank time. Needed to safely cover the switching event and the duration of the ringing on the sense resistor.
@@ -68,27 +69,74 @@ void motorSetup() {
   #ifdef RXD2
     driver.semin(0);    // CoolStep/SmartEnergy 4-bit uint that sets lower threshold, 0 disable
     driver.TCOOLTHRS((3089838.00 * pow(float(max_speed), -1.00161534)) * 1.5);  // Lower threshold velocity for switching on smart energy CoolStep and StallGuard to DIAG output
-    driver.SGTHRS(20);  // [0..255] the higher the more sensitive to stall
+    driver.SGTHRS(10);  // [0..255] the higher the more sensitive to stall
     attachInterrupt(DIAG_PIN, stallguardInterrupt, RISING);
   #endif
   #endif
 
   // Stepper motor setup
-  engine.init();
-  stepper = engine.stepperConnectToPin(STEP_PIN);
-  if (stepper) {
-    stepper->setEnablePin(EN_PIN);
-    stepper->setDirectionPin(DIR_PIN);
-    stepper->setSpeedInHz(max_speed);
-    stepper->setAcceleration(acceleration);
-    stepper->setAutoEnable(true);
-    stepper->setDelayToDisable(200);
-  } else {
-    Serial.println("[E] Please use a different GPIO pin for the STEP_PIN. The current pin is incompatible..");
-  }
+  stepper.setEnablePin(EN_PIN);
+  stepper.setMaxSpeed(max_speed);
+  stepper.setAcceleration(acceleration);
+  stepper.setPinsInverted(false, false, true);
+  stepper.disableOutputs();
 
   // Load current position and maximum position from memory
   loadPositions();
+}
+
+
+// Returns current rounded position percentage. 0 is closed.
+int motorCurrentPercent() {
+  if (currPos == 0)
+    return 0;
+  else
+    return (int) round((float) currPos / (float) maxPos * 100);
+}
+
+
+void motorStop() {
+  isMotorRunning = false;
+
+  // Re-calcuate max/min positions
+  if (isSetMax) {
+    isSetMax = false;
+    maxPos = stepper.currentPosition();
+    memory.putInt("maxPos", maxPos);
+    stepper.setMaxSpeed(max_speed);  // Set stepper motor speed back to normal
+  } else if (isSetMin) {
+    isSetMin = false;
+    int distanceTraveled = 2147483646 - stepper.currentPosition();
+    maxPos = maxPos + distanceTraveled - prevPos;
+    stepper.setCurrentPosition(0);
+    stepper.setMaxSpeed(max_speed);  // Set stepper motor speed back to normal
+  }
+
+  // Stop stepper motor and disable driver
+  stepper.moveTo(stepper.currentPosition());
+  stepper.disableOutputs();
+
+  // Updated current position
+  currPos = stepper.currentPosition();
+  memory.putInt("currPos", currPos);
+
+  // Send current position in percentage to MQTT server
+  sendMqtt((String) motorCurrentPercent());
+}
+
+
+void motorRun() {
+  if (isMotorRunning) {
+    if (stepper.distanceToGo() != 0)
+      stepper.run();
+    else
+      motorStop();
+  }
+
+  if (isMotorStalled) {
+    isMotorStalled = false;
+    motorStop();
+  }
 }
 
 
@@ -100,13 +148,10 @@ int percentToSteps(int percent) {
 
 // Stepper must move first before isMotorRunning==true; else motorRun will excute first before stepper stops
 void motorMoveTo(int newPos) {
-  if ((newPos < stepper->targetPos() && stepper->getCurrentPosition() < stepper->targetPos())
-  || (newPos > stepper->targetPos() && stepper->getCurrentPosition() > stepper->targetPos()))
-    stepper->forceStop();
-  
-  if (newPos != stepper->getCurrentPosition() && newPos <= maxPos) {
-    stepper->moveTo(newPos);
+  stepper.moveTo(newPos);
+  if (stepper.distanceToGo() != 0 && newPos <= maxPos) {
     isMotorRunning = true;
+    stepper.enableOutputs();
   }
 }
 
@@ -128,7 +173,7 @@ void motorMax() {
 
 void motorSetMax() {
   isSetMax = true;
-  stepper->setSpeedInHz(max_speed / 4);
+  stepper.setMaxSpeed(max_speed / 4);
   maxPos = 2147483646;
   motorMoveTo(2147483646);
 }
@@ -136,50 +181,8 @@ void motorSetMax() {
 
 void motorSetMin() {
   isSetMin = true;
-  stepper->setSpeedInHz(max_speed / 4);
-  prevPos = stepper->getCurrentPosition();
-  stepper->setCurrentPosition(2147483646);
+  stepper.setMaxSpeed(max_speed / 4);
+  prevPos = stepper.currentPosition();
+  stepper.setCurrentPosition(2147483646);
   motorMoveTo(0);
-}
-
-
-// Returns current rounded position percentage. 0 is closed.
-int motorCurrentPercentage() {
-  if (currPos == 0)
-    return 0;
-  else
-    return (int) round((float) currPos / (float) maxPos * 100);
-}
-
-
-void motorStop() {
-  stepper->forceStop();
-  stepper->moveTo(stepper->getCurrentPosition());
-}
-
-
-void motorRun() {
-  if (isMotorRunning) {
-    vTaskDelay(1);
-    if (!stepper->isRunning()) {
-      isMotorRunning = false;
-
-      if (isSetMax) {
-        isSetMax = false;
-        maxPos = stepper->getCurrentPosition();
-        memory.putInt("maxPos", maxPos);
-        stepper->setSpeedInHz(max_speed);  // Set stepper motor speed back to normal
-      } else if (isSetMin) {
-        isSetMin = false;
-        int distanceTraveled = 2147483646 - stepper->getCurrentPosition();
-        maxPos = maxPos + distanceTraveled - prevPos;
-        stepper->setCurrentPosition(0);
-        stepper->setSpeedInHz(max_speed);  // Set stepper motor speed back to normal
-      }
-
-      currPos = stepper->getCurrentPosition();
-      memory.putInt("currPos", currPos);
-      sendMqtt((String) motorCurrentPercentage());
-    }
-  }
 }

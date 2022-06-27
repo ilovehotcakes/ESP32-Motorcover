@@ -78,6 +78,7 @@ void Motor::stop() {
     isSetMin = false;
     int distanceTraveled = 2147483646 - stepper.currentPosition();
     maxPos = maxPos + distanceTraveled - prevPos;
+    memory.putInt("maxPos", maxPos);
     stepper.setCurrentPosition(0);
     stepper.setMaxSpeed(velocity);  // Set stepper motor speed back to normal
   }
